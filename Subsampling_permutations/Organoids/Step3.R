@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-
+# Non slurm
 # run_ordinals_serial_updated.R
 # Nested ordinal regression pipeline (AGE & DIFF) + landscape ordinals
 # - Auto-discovers IntO/IntHO_* files
