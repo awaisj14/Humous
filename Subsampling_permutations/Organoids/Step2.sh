@@ -10,6 +10,6 @@
 
 singularity exec \
   /acanas/m-BioinfoSupport/singularity/ngs_v1.1.sif \
-  Rscript Step2_Int.R full.list_f_perm_0${SLURM_ARRAY_TASK_ID}
+  Rscript Step2.R full.list_f_perm_0${SLURM_ARRAY_TASK_ID}
 
 
