@@ -1,0 +1,251 @@
+########### MOTIF ANALYSIS PIPELINE ###########
+# ===============================
+# CONFIG
+# ===============================
+GENE_HUMAN = "JUNB"
+GENE_MOUSE = "Junb"
+
+# Harmonized Cicero outputs
+human_file = "cicero_connections_harmonized.csv"   # from R, merged cicero connections from Trevino and Wang merged
+mouse_file = "li_cicero_connections.csv"
+
+highlight_tfs = ["IRF1","ATF3","HES1","FOS","SOX9","STAT3","HES5"]
+
+# ===============================
+# IMPORTS
+# ===============================
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib
+from pybedtools import BedTool
+from celloracle import motif_analysis as ma
+
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
+matplotlib.rcParams["svg.fonttype"] = "none"
+
+# ===============================
+# PEAK NORMALIZATION + PREPROCESSING
+# ===============================
+def normalize_peak_id(x):
+    """
+    Convert peak IDs into chr_start_end.
+    """
+    if "_" in x and len(x.split("_")) == 3 and x.split("_")[1].isdigit():
+        return x
+    if ":" in x:
+        chrom, rest = x.split(":")
+        if "-" in rest:
+            start, end = rest.split("-")
+            return f"{chrom}_{start}_{end}"
+        else:
+            start = rest
+            end = str(int(start) + 1)
+            return f"{chrom}_{start}_{end}"
+    parts = x.split("-")
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        return f"{parts[0]}_{parts[1]}_{parts[2]}"
+    raise ValueError(f"Unrecognized peak format: {x}")
+
+def process_harmonized_dataset(cicero_file, ref_genome, out_csv):
+    """
+    Process a harmonized Cicero connection file.
+    Produces peak-to-gene mappings for motif analysis.
+    """
+    cicero = pd.read_csv(cicero_file)
+    cicero["Peak1"] = cicero["Peak1"].astype(str).apply(normalize_peak_id)
+    cicero["Peak2"] = cicero["Peak2"].astype(str).apply(normalize_peak_id)
+
+    peak_list = pd.concat([cicero["Peak1"], cicero["Peak2"]]).unique().tolist()
+    tss_annotated = ma.get_tss_info(peak_str_list=peak_list, ref_genome=ref_genome)
+
+    integrated = ma.integrate_tss_peak_with_cicero(
+        tss_peak=tss_annotated,
+        cicero_connections=cicero
+    )
+
+    peak = integrated[integrated.coaccess >= 0.1]
+    peak = peak[["peak_id", "gene_short_name"]].reset_index(drop=True)
+    peak.to_csv(out_csv, index=False)
+    print(f"Processed {out_csv}, n={peak.shape[0]}")
+    return out_csv
+
+# Run preprocessing
+human_processed = process_harmonized_dataset(human_file, "hg38", "human_processed.csv")
+mouse_processed = process_harmonized_dataset(mouse_file, "mm10", "mouse_processed.csv")
+
+# ===============================
+# ROI SELECTION
+# ===============================
+def get_roi_from_processed(processed_csv, ref_genome, gene,
+                           upstream=2000, downstream=2000,
+                           promoter_buffer=0):
+    """
+    Extract peaks around TSS of a gene.
+    """
+    df = pd.read_csv(processed_csv)
+    df["peak_id"] = df["peak_id"].astype(str)
+
+    tss_annotated = ma.get_tss_info(df["peak_id"].tolist(), ref_genome=ref_genome)
+    subset = tss_annotated[tss_annotated["gene_short_name"].str.upper() == gene.upper()]
+    if subset.shape[0] == 0:
+        raise ValueError(f"No peaks found near {gene} in {ref_genome}")
+
+    windows = []
+    for _, row in subset.iterrows():
+        chrom, start, end, strand = row["chr"], row["start"], row["end"], row["strand"]
+        tss = start if strand == "+" else end
+        if strand == "+":
+            win_start, win_end = max(0, tss - upstream), tss + downstream
+            buf_start, buf_end = tss - promoter_buffer, tss + promoter_buffer
+        else:
+            win_start, win_end = max(0, tss - downstream), tss + upstream
+            buf_start, buf_end = tss - promoter_buffer, tss + promoter_buffer
+
+        if promoter_buffer > 0:
+            if win_start < buf_start:
+                windows.append([chrom, win_start, buf_start, gene])
+            if win_end > buf_end:
+                windows.append([chrom, buf_end, win_end, gene])
+        else:
+            windows.append([chrom, win_start, win_end, gene])
+
+    roi_bed = BedTool(windows)
+
+    # Convert peaks into BED
+    peak_parts = df["peak_id"].str.split("_", expand=True)
+    peak_bed = BedTool.from_dataframe(pd.DataFrame({
+        "chr": peak_parts[0],
+        "start": peak_parts[1].astype(int),
+        "end": peak_parts[2].astype(int)
+    }))
+
+    roi_peaks = peak_bed.intersect(roi_bed, u=True)
+    out = roi_peaks.to_dataframe(names=["chr", "start", "end"])
+    out["peak_id"] = out.apply(lambda r: f"{r.chr}_{r.start}_{r.end}", axis=1)
+    out["gene_short_name"] = gene
+    return out
+
+# ===============================
+# MOTIF SCANNING
+# ===============================
+def run_motif_scan(roi_df, ref_genome, prefix):
+    tfi = ma.TFinfo(peak_data_frame=roi_df, ref_genome=ref_genome)
+    tfi.scan(fpr=0.02, motifs=None, verbose=True)
+    tfi.reset_filtering()
+
+    scanned = tfi.scanned_df.copy()
+    scanned = scanned[scanned["score"] >= 0].reset_index(drop=True)
+    scanned.to_csv(f"{prefix}_motif_scanned_raw.csv", index=False)
+
+    try:
+        tfi.filter_motifs_by_score(threshold=1)
+        tfi.make_TFinfo_dataframe_and_dictionary(verbose=True)
+        df = tfi.to_dataframe()
+        df = df[df["score"] >= 0].reset_index(drop=True)
+    except Exception:
+        df = scanned
+
+    df.to_csv(f"{prefix}_motif_scan.csv", index=False)
+    return df, scanned
+
+def collapse_to_tf_means(scanned_df):
+    rows = []
+    for _, row in scanned_df.iterrows():
+        for col in ["factors_direct", "factors_indirect"]:
+            if pd.notna(row[col]) and row[col] != "":
+                tfs = [tf.strip().upper() for tf in row[col].split(",")]
+                for tf in tfs:
+                    rows.append((tf, row["score"]))
+    if not rows:
+        return pd.Series(dtype=float)
+    df_expanded = pd.DataFrame(rows, columns=["TF", "score"])
+    return df_expanded.groupby("TF")["score"].mean()
+
+# ===============================
+# PLOTTING
+# ===============================
+def plot_tf_scores(human_scores, mouse_scores, highlight_tfs=None, out_pdf="tf_score_correlation.pdf"):
+    all_tfs = set(human_scores.index).union(set(mouse_scores.index))
+    combined = pd.DataFrame(index=sorted(all_tfs))
+    combined["human"] = human_scores
+    combined["mouse"] = mouse_scores
+    combined = combined.fillna(0)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.scatter(combined["human"], combined["mouse"], alpha=0.5, s=20, c="gray")
+
+    max_val = max(combined.max()) * 1.05
+    ax.plot([0, max_val], [0, max_val], ls="--", c="black", alpha=0.7)
+
+    if highlight_tfs:
+        for tf in highlight_tfs:
+            tf_upper = tf.upper()
+            if tf_upper in combined.index:
+                x = combined.loc[tf_upper, "human"]
+                y = combined.loc[tf_upper, "mouse"]
+                ax.scatter(x, y, color="red", s=60, zorder=3, label=tf_upper)
+                ax.text(x, y, tf_upper, fontsize=9, color="red")
+
+    ax.set_xlabel("Human motif score (mean per TF)")
+    ax.set_ylabel("Mouse motif score (mean per TF)")
+    ax.set_title("TF motif enrichment comparison")
+    if highlight_tfs:
+        ax.legend()
+
+    plt.tight_layout()
+    fig.savefig(out_pdf, format="pdf")
+    plt.close(fig)
+    print(f"Saved plot → {out_pdf}")
+
+# ===============================
+# RUN ALL SETTINGS + SUMMARY
+# ===============================
+settings = {
+    "2kb_updown":   dict(upstream=2000, downstream=2000, promoter_buffer=0),
+    "10kb_updown":  dict(upstream=10000, downstream=10000, promoter_buffer=2000),
+    "100kb_updown": dict(upstream=100000, downstream=100000, promoter_buffer=2000),
+}
+
+summary_rows = []
+
+for label, params in settings.items():
+    print(f"\n===== Running setting: {label} =====")
+
+    # Human
+    roi_h = get_roi_from_processed(human_processed, "hg38", GENE_HUMAN, **params)
+    print(f"Human ROI peaks: {roi_h.shape[0]}")
+    df_h, scanned_h = run_motif_scan(roi_h, "hg38", f"human_{GENE_HUMAN}_{label}")
+    scores_h = collapse_to_tf_means(scanned_h).rename("human")
+
+    # Mouse
+    roi_m = get_roi_from_processed(mouse_processed, "mm10", GENE_MOUSE, **params)
+    print(f"Mouse ROI peaks: {roi_m.shape[0]}")
+    df_m, scanned_m = run_motif_scan(roi_m, "mm10", f"mouse_{GENE_MOUSE}_{label}")
+    scores_m = collapse_to_tf_means(scanned_m).rename("mouse")
+
+    # Normalize index
+    scores_h.index = scores_h.index.str.upper()
+    scores_m.index = scores_m.index.str.upper()
+
+    # Correlation summary
+    combined = pd.concat([scores_h, scores_m], axis=1, join="outer").fillna(0)
+    shared = combined[(combined["human"] > 0) & (combined["mouse"] > 0)]
+    r = shared.corr(method="pearson").iloc[0,1] if not shared.empty else float("nan")
+
+    summary_rows.append({
+        "Setting": label,
+        "Shared_TFs": ((combined["human"] > 0) & (combined["mouse"] > 0)).sum(),
+        "Human_ROI_peaks": roi_h.shape[0],
+        "Mouse_ROI_peaks": roi_m.shape[0],
+        "Pearson_r_shared": r
+    })
+
+    # Plots
+    plot_tf_scores(scores_h, scores_m, highlight_tfs=highlight_tfs,
+                   out_pdf=f"tf_score_correlation_{label}.pdf")
+
+# Save summary
+df_summary = pd.DataFrame(summary_rows)
+df_summary.to_csv("motif_analysis_summary.csv", index=False)
+print("\nSaved summary → motif_analysis_summary.csv")
