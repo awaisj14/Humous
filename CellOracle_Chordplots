@@ -232,3 +232,63 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+import pandas as pd
+import os
+
+###########################################
+# CONFIGURATION
+###########################################
+
+FOCUS_GENE = "JUNB"
+INPUT_GRN_FILE = "GRN_final/RG_GRN_final.csv"
+LANDINFO_FILE = "landinfo.csv"
+OUTPUT_DIR = "junb_csv_outputs"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+###########################################
+# UTILITIES
+###########################################
+
+def get_genes_by_pattern(landinfo_file, allowed_types):
+    df = pd.read_csv(landinfo_file)
+    return set(df[df['AnnotTypes'].isin(allowed_types)]['gene'])
+
+###########################################
+# MAIN
+###########################################
+
+def main():
+    # Load GRN
+    df = pd.read_csv(INPUT_GRN_FILE)
+
+    # Get landinfo subsets
+    rg_genes = get_genes_by_pattern(LANDINFO_FILE, {"RG", "RG_IP"})
+    n_genes  = get_genes_by_pattern(LANDINFO_FILE, {"N", "IP_N"})
+
+    # --- Case 1: JUNB positively regulates RG/RG_IP targets ---
+    df_rg = df[(df['source'] == FOCUS_GENE) &
+               (df['target'].isin(rg_genes)) &
+               (df['coef_mean'] > 0)]
+    out_rg = os.path.join(OUTPUT_DIR, "JUNB_positive_RG_RGIP_targets.csv")
+    df_rg.to_csv(out_rg, index=False)
+    print(f"✅ Saved {len(df_rg)} rows → {out_rg}")
+
+    # --- Case 2: JUNB negatively regulates N/IP_N targets ---
+    df_n = df[(df['source'] == FOCUS_GENE) &
+              (df['target'].isin(n_genes)) &
+              (df['coef_mean'] < 0)]
+    out_n = os.path.join(OUTPUT_DIR, "JUNB_negative_N_IPN_targets.csv")
+    df_n.to_csv(out_n, index=False)
+    print(f"✅ Saved {len(df_n)} rows → {out_n}")
+
+
+if __name__ == "__main__":
+    main()
