@@ -1,0 +1,180 @@
+# HV3
+# INTEGRATION OF ORG DATASETS 
+# Non slurm
+
+source("lib_misc.R")
+library(Seurat)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(plyr)
+library(scales)
+library(purrr)
+library(digest)
+
+# Load raw org datasets and join them in a list
+full.list <- list(
+  Av19 = base::readRDS("Org/Av19.rds"),
+  Kp19 = base::readRDS("Org/Kp19.rds"),
+  Pt20 = base::readRDS("Org/Pt20.rds"),
+  Ck19 = base::readRDS("Org/Ck19.rds")
+)
+
+full.list$Ck19 <- UpdateSeuratObject(full.list$Ck19)
+full.list$Kp19 <- UpdateSeuratObject(full.list$Kp19)
+
+# Load integration reference and annotations
+IntH <- base::readRDS("/home/users/j/javed/humous_reviews/OG_humous/IntH.rds")
+DiffTypes_org <- readr::read_csv("IntO_OG/DiffTypes_org.csv")
+
+# Helper to annotate and filter each dataset
+filter_cells <- function(obj, dataset_name) {
+  obj$age_ek <- DiffTypes_org$age[base::match(base::colnames(obj), DiffTypes_org$cells)]
+  obj$diff_ek <- DiffTypes_org$DiffTypes[base::match(base::colnames(obj), DiffTypes_org$cells)]
+  obj$protocol <- DiffTypes_org$proto[base::match(base::colnames(obj), DiffTypes_org$cells)]
+  obj$dataset <- dataset_name
+  obj$dataset_proto <- base::paste0(dataset_name, "_", obj$protocol)
+  subset(obj, diff_ek %in% c("RG", "IPC", "N") & age_ek %in% c("1-2 m", "2-3 m", "3 m", "3.5-5 m", "6-7 m"))
+}
+
+full.list <- base::lapply(base::names(full.list), function(ds) filter_cells(full.list[[ds]], ds))
+base::names(full.list) <- c("Av19", "Kp19", "Pt20", "Ck19")
+
+# Merge all filtered datasets
+mergedO <- merge(full.list$Av19, list(full.list$Kp19, full.list$Pt20, full.list$Ck19))
+mergedO@assays$integrated <- NULL
+
+# Define fixed groups that are taken fully (no random subsample) and sampling pool
+mergedO$age_dataset <- base::paste(mergedO$age_ek, mergedO$dataset)
+fixed_groups <- c("1-2 m Av19", "1-2 m Kp19", "3.5-5 m Av19", "3.5-5 m Kp19", "6-7 m Kp19")
+fixed_cells <- subset(mergedO, cells = base::colnames(mergedO)[mergedO$age_dataset %in% fixed_groups])
+sampling_pool <- subset(mergedO, cells = base::colnames(mergedO)[!mergedO$age_dataset %in% fixed_groups])
+
+# Sampling helper that returns selected barcodes and QC
+random_draw_cells <- function(cells, n_req, label, seed) {
+  base::set.seed(seed)
+  cells <- base::sample(cells)
+  avail <- base::length(cells)
+  n_draw <- base::min(n_req, avail)
+  status <- if (avail == n_req) "EQUAL_TO_AVAILABLE" else if (n_req > avail) "REQUEST_GT_AVAILABLE" else "OK"
+  if (status != "OK") {
+    base::message(base::sprintf("[ %s ] avail=%d req=%d -> draw=%d (%s)", label, avail, n_req, n_draw, status))
+  }
+  picked <- if (n_draw > 0) base::sample(cells, n_draw) else character(0)
+  list(sel = picked,
+       qc = data.frame(group = label, avail_n = avail, req_n = n_req,
+                       draw_n = length(picked), status = status, stringsAsFactors = FALSE))
+}
+
+# Function to build one permutation
+make_perm <- function(perm_index, base_seed = 2025) {
+  seed_offset <- base_seed + perm_index
+  base::message("Building permutation ", perm_index, " (seed=", seed_offset, ")")
+  qc_rows <- list()
+  
+  # 3 m balanced by dataset
+  mo3m <- subset(sampling_pool, age_ek == "3 m")
+  n_by_ds_3m <- base::table(mo3m$dataset)
+  min_3m <- base::min(base::as.integer(n_by_ds_3m))
+  sel_3m_cells <- base::unlist(base::lapply(base::names(n_by_ds_3m), function(ds) {
+    cells <- base::colnames(subset(mo3m, dataset == ds))
+    out <- random_draw_cells(cells, min_3m, paste0("3m_", ds), seed_offset + as.integer(factor(ds)))
+    qc_rows[[length(qc_rows) + 1]] <<- cbind(perm = perm_index, label = paste0("3m_", ds), out$qc)
+    out$sel
+  }))
+  keep_3m <- subset(mo3m, cells = sel_3m_cells)
+  
+  # 6-7 m non-Kp19
+  mo67 <- subset(sampling_pool, age_ek == "6-7 m" & dataset != "Kp19")
+  sel_67_cells <- base::unlist(base::lapply(base::unique(mo67$dataset), function(ds) {
+    cells <- base::colnames(subset(mo67, dataset == ds))
+    out <- random_draw_cells(cells, 4322, paste0("6-7m_", ds), seed_offset + as.integer(factor(ds)))
+    qc_rows[[length(qc_rows) + 1]] <<- cbind(perm = perm_index, label = paste0("6-7m_", ds), out$qc)
+    out$sel
+  }))
+  keep_67 <- subset(mo67, cells = sel_67_cells)
+  
+  # 2-3 m fixed draws
+  mo23 <- subset(sampling_pool, age_ek == "2-3 m")
+  out_kp <- random_draw_cells(base::colnames(subset(mo23, dataset == "Kp19")), 700, "2-3m_Kp19", seed_offset + 1)
+  qc_rows[[length(qc_rows) + 1]] <- cbind(perm = perm_index, label = "2-3m_Kp19", out_kp$qc)
+  keep_kp <- subset(mo23, cells = out_kp$sel)
+  
+  out_ck <- random_draw_cells(base::colnames(subset(mo23, dataset == "Ck19")), 1955, "2-3m_Ck19", seed_offset + 2)
+  qc_rows[[length(qc_rows) + 1]] <- cbind(perm = perm_index, label = "2-3m_Ck19", out_ck$qc)
+  keep_ck <- subset(mo23, cells = out_ck$sel)
+  
+  out_pt <- random_draw_cells(base::colnames(subset(mo23, dataset == "Pt20")), 3639, "2-3m_Pt20", seed_offset + 3)
+  qc_rows[[length(qc_rows) + 1]] <- cbind(perm = perm_index, label = "2-3m_Pt20", out_pt$qc)
+  keep_pt <- subset(mo23, cells = out_pt$sel)
+  
+  # Merge sampled pieces and combine with fixed cells
+  sampled_all <- merge(keep_3m, list(keep_67, keep_kp, keep_ck, keep_pt))
+  final_perm <- merge(fixed_cells, sampled_all)
+  
+  qc_df <- base::do.call(base::rbind, qc_rows)
+  list(final = final_perm, sampled = sampled_all, qc = qc_df)
+}
+
+# Run permutations
+n_perms <- 5
+sel_hash <- character(n_perms)
+sampled_hash <- character(n_perms)
+for (i in seq_len(n_perms)) {
+  res <- make_perm(i, base_seed = 2025)
+  final_perm <- res$final
+  sampled_all <- res$sampled
+  
+  # Save outputs
+  base::saveRDS(final_perm, sprintf("mergedO_f_perm_%02d.rds", i))
+  readr::write_csv(base::data.frame(cell = base::colnames(final_perm)), sprintf("draw_cells_perm_%02d.csv", i))
+  
+  perm_list <- base::lapply(base::names(full.list), function(ds) {
+    subset(full.list[[ds]], cells = base::intersect(base::colnames(final_perm), base::colnames(full.list[[ds]])))
+  })
+  base::names(perm_list) <- base::names(full.list)
+  base::saveRDS(perm_list, sprintf("full.list_f_perm_%02d.rds", i))
+  readr::write_csv(res$qc, sprintf("sampling_qc_perm_%02d.csv", i))
+  
+  # Compute hashes
+  sel_hash[i] <- digest::digest(paste0(base::colnames(final_perm), collapse = ","), algo = "xxhash64")
+  sampled_hash[i] <- digest::digest(paste0(base::colnames(sampled_all), collapse = ","), algo = "xxhash64")
+  base::message(sprintf("perm_%02d sampled-only hash: %s", i, sampled_hash[i]))
+}
+
+# Write selection hashes
+readr::write_csv(base::data.frame(perm = sprintf("perm_%02d", seq_len(n_perms)),
+                                  hash = sel_hash,
+                                  sampled_hash = sampled_hash),
+                 "selection_hashes.csv")
+base::message("Selection hashes written to selection_hashes.csv")
+
+# Overlap diagnostics
+perm_files <- base::list.files(pattern = "^draw_cells_perm_\\d{2}\\.csv$")
+perm_cells <- base::lapply(perm_files, function(f) readr::read_csv(f, show_col_types = FALSE)$cell)
+base::names(perm_cells) <- base::gsub("\\.csv$", "", perm_files)
+perm_names <- base::names(perm_cells)
+n <- base::length(perm_cells)
+overlap_matrix <- base::matrix(0, nrow = n, ncol = n, dimnames = list(perm_names, perm_names))
+for (i in seq_len(n)) for (j in seq_len(n)) overlap_matrix[i, j] <- base::length(base::intersect(perm_cells[[i]], perm_cells[[j]]))
+
+# Save & report
+readr::write_csv(as.data.frame(overlap_matrix), "perm_overlap_matrix.csv")
+base::message("Wrote overlap matrix to perm_overlap_matrix.csv")
+print(overlap_matrix)
+
+cell_counts <- base::sapply(perm_cells, length)
+high_overlap_flag <- base::outer(cell_counts, cell_counts, function(x, y) base::floor(0.95 * base::pmin(x, y)))
+too_similar <- overlap_matrix >= high_overlap_flag & base::lower.tri(overlap_matrix)
+if (any(too_similar)) {
+  base::message("⚠️ High overlap detected:")
+  idx <- which(too_similar, arr.ind = TRUE)
+  for (k in seq_len(base::nrow(idx))) {
+    ii <- idx[k, 1]; jj <- idx[k, 2]
+    base::message(sprintf(" - %s vs %s: %d shared (%.1f%% of min)",
+                          perm_names[ii], perm_names[jj], overlap_matrix[ii, jj],
+                          100 * overlap_matrix[ii, jj] / base::min(cell_counts[ii], cell_counts[jj])))
+  }
+} else {
+  base::message("✅ No suspiciously high overlap.")
+}
