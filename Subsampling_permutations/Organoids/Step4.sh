@@ -18,7 +18,7 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 
 # --- Config paths ---
-R_SCRIPT="Step4_landscapes.R"   # your adapted Step4 script
+R_SCRIPT="Step4.R"   # your adapted Step4 script
 LANDS_DIR="lands"               # folder containing IntH_L_perm_%02d.rds
 OUT_OBJ_DIR="LandsH"             # where LandsS_H_* will be written
 
