@@ -1,0 +1,234 @@
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import os
+
+###########################################
+# CONFIGURATION
+###########################################
+# This assumes you have generated the RG_final.csv that contains the source > target coef_means.
+FOCUS_GENE = "IRF1"
+PLOT_DIRECTION = "sources"  # "targets" or "sources"
+INPUT_GRN_FILE = "GRN_final/RG_GRN_final.csv"
+LANDINFO_FILE = "landinfo.csv"
+OUTPUT_DIR = "chord_plots/Illustrator_ready"
+GENANNOT = "IPN_N"
+ALLOWED_ANNOT_TYPES = {"IP_N", "N"}
+ALLOWED_CONDITIONS = {"H"}
+
+# NEW: choose which edges to include by sign of coef_mean
+# one of: "all", "positive", "negative"
+SIGN_MODE = "negative"
+
+# Back-compat (kept so your config block looks the same as before).
+# If SIGN_MODE is invalid/missing, this will be used:
+INCLUDE_ONLY_POSITIVE_WEIGHTS = False  # legacy; ignored when SIGN_MODE is valid
+
+# Leave this empty set() if you don’t want to highlight any genes
+HIGHLIGHT_GENES = set([
+    # Example: "PTN", "GLI3", "CREB5"
+])
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+###########################################
+# UTILITIES
+###########################################
+
+def pol2cart(r, theta_rad):
+    return r * np.cos(theta_rad), r * np.sin(theta_rad)
+
+def get_allowed_genes(landinfo_file, allowed_types, allowed_conditions):
+    df = pd.read_csv(landinfo_file)
+    return set(df[(df['AnnotTypes'].isin(allowed_types)) & (df['cond'].isin(allowed_conditions))]['gene'])
+
+def _resolve_sign_mode(legacy_positive_only):
+    """
+    Resolve the effective sign mode:
+    - If SIGN_MODE is a valid string in {"all","positive","negative"}, use it.
+    - Otherwise, fall back to legacy boolean:
+        True  -> "positive"
+        False -> "all"
+    """
+    try:
+        mode = str(SIGN_MODE).lower()
+        if mode in {"all", "positive", "negative"}:
+            return mode
+    except Exception:
+        pass
+    return "positive" if legacy_positive_only else "all"
+
+def load_and_filter_grn(filepath, focus_gene, allowed_genes, direction, positive_only=True):
+    """
+    NOTE: signature kept identical to your original code.
+    Internally we use SIGN_MODE (if valid), else fall back to positive_only.
+    """
+    df = pd.read_csv(filepath)
+    mode = _resolve_sign_mode(positive_only)
+
+    if direction == "targets":
+        df = df[df['source'] == focus_gene]
+        if mode == "positive":
+            df = df[df['coef_mean'] > 0]
+        elif mode == "negative":
+            df = df[df['coef_mean'] < 0]
+        elif mode == "all":
+            df = df[df['coef_mean'].notna()]
+        else:
+            raise ValueError("SIGN_MODE must be one of {'all','positive','negative'}")
+        df = df[df['target'].isin(allowed_genes)]
+
+    elif direction == "sources":
+        df = df[df['target'] == focus_gene]
+        if mode == "positive":
+            df = df[df['coef_mean'] > 0]
+        elif mode == "negative":
+            df = df[df['coef_mean'] < 0]
+        elif mode == "all":
+            df = df[df['coef_mean'].notna()]
+        else:
+            raise ValueError("SIGN_MODE must be one of {'all','positive','negative'}")
+        df = df[df['source'].isin(allowed_genes)]
+
+    else:
+        raise ValueError("PLOT_DIRECTION must be 'targets' or 'sources'")
+
+    # Weight used for chord thickness (magnitude only, sign is handled by filtering)
+    df['weight'] = df['coef_mean'].abs()
+    return df[['source', 'target', 'weight']]
+
+def build_adjacency_matrix(df):
+    genes = sorted(set(df['source']) | set(df['target']))
+    index = {gene: i for i, gene in enumerate(genes)}
+    mat = np.zeros((len(genes), len(genes)))
+    for _, row in df.iterrows():
+        i = index[row['source']]
+        j = index[row['target']]
+        mat[i, j] = row['weight']
+    return mat, genes
+
+###########################################
+# PLOTTING
+###########################################
+
+def draw_chord_plot(mat, genes, output_path, focus_gene, align_angle=90, highlight_genes=None):
+    highlight_genes = highlight_genes or set()  # handle None
+
+    N = len(genes)
+    angle_per_gene = 360 / N
+    angles = [(i * angle_per_gene, (i + 1) * angle_per_gene) for i in range(N)]
+
+    # Align focus gene
+    focus_idx = genes.index(focus_gene)
+    f_start, f_end = angles[focus_idx]
+    f_mid = (f_start + f_end) / 2
+    rotation_offset = align_angle - f_mid
+
+    angle_map = [((s + rotation_offset) % 360, (e + rotation_offset) % 360) for s, e in angles]
+
+    fig = go.Figure()
+    R = 1.0
+    shapes = []
+    labels = []
+
+    for i, gene in enumerate(genes):
+        theta0, theta1 = angle_map[i]
+        theta0_rad, theta1_rad = np.radians(theta0), np.radians(theta1)
+        x0, y0 = pol2cart(R, theta0_rad)
+        x1, y1 = pol2cart(R, theta1_rad)
+        large_arc = 1 if (theta1 - theta0) % 360 > 180 else 0
+
+        path = f"M {x0},{y0} A {R},{R} 0 {large_arc},1 {x1},{y1}"
+
+        # Highlight arcs if gene is in highlight_genes
+        if highlight_genes and gene in highlight_genes:
+            arc_color = "black"
+            font_size = 10
+        else:
+            arc_color = "lightgrey"
+            font_size = 6
+
+        shapes.append(dict(type="path", path=path, line=dict(color=arc_color, width=2)))
+
+        mid_theta = (theta0 + theta1) / 2
+        x, y = pol2cart(R + 0.1, np.radians(mid_theta))
+
+        labels.append(dict(
+            x=x, y=y, text=gene, showarrow=False,
+            font=dict(size=font_size, color="black"),
+            xanchor="center", yanchor="middle"
+        ))
+
+    # Chords
+    max_val = mat.max() if mat.max() > 0 else 1
+    for i in range(len(genes)):
+        for j in range(len(genes)):
+            if i == j:
+                continue
+            weight = mat[i, j]
+            if weight == 0:
+                continue
+            theta_i = np.radians(sum(angle_map[i]) / 2)
+            theta_j = np.radians(sum(angle_map[j]) / 2)
+            xi, yi = pol2cart(R, theta_i)
+            xj, yj = pol2cart(R, theta_j)
+            width = 3 * weight / max_val
+            path = f"M {xi},{yi} Q 0,0 {xj},{yj}"
+            shapes.append(dict(
+                type="path", path=path,
+                line=dict(color="grey", width=width),
+                opacity=0.5
+            ))
+
+    fig.update_layout(
+        shapes=shapes,
+        annotations=labels,
+        xaxis=dict(visible=False, range=[-1.5, 1.5]),
+        yaxis=dict(visible=False, range=[-1.5, 1.5]),
+        width=800, height=800,
+        plot_bgcolor='white',
+        margin=dict(t=20, b=20, l=20, r=20),
+        showlegend=False
+    )
+
+    fig.write_image(output_path, format="pdf")
+    print(f"✅ Saved: {output_path}")
+
+###########################################
+# MAIN
+###########################################
+
+def main():
+    allowed_genes = get_allowed_genes(
+        LANDINFO_FILE,
+        ALLOWED_ANNOT_TYPES,
+        ALLOWED_CONDITIONS
+    )
+
+    df = load_and_filter_grn(
+        INPUT_GRN_FILE,
+        FOCUS_GENE,
+        allowed_genes,
+        PLOT_DIRECTION,
+        INCLUDE_ONLY_POSITIVE_WEIGHTS  # legacy arg; SIGN_MODE takes precedence
+    )
+
+    if df.empty:
+        print("⚠️ No data to plot after filtering.")
+        return
+
+    mat, genes = build_adjacency_matrix(df)
+
+    # Focus gene at top for targets, bottom for sources
+    align_angle = 90 if PLOT_DIRECTION == "targets" else 270
+
+    # Keep filename format identical; (note: will overwrite if you switch SIGN_MODE)
+    output_file = os.path.join(
+        OUTPUT_DIR,
+        f"chord_{FOCUS_GENE}_{PLOT_DIRECTION}_{GENANNOT}_{SIGN_MODE}_final.pdf"
+    )
+
+    draw_chord_plot(mat, genes, output_file, FOCUS_GENE, align_angle, HIGHLIGHT_GENES)
+
+if __name__ == "__main__":
+    main()
