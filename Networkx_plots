@@ -1,0 +1,131 @@
+import pandas as pd
+import networkx as nx
+import matplotlib.pyplot as plt
+import os
+
+###########################################
+# CONFIGURATION
+###########################################
+
+FOCUS_GENE = "JUNB"
+INPUT_GRN_FILE = "GRN_final/RG_GRN_final.csv"
+LANDINFO_FILE   = "landinfo.csv"
+OUTPUT_DIR      = "chord_plots/NetworkX_ready"
+
+# Use only RG and RG_IP
+ALLOWED_ANNOT_TYPES = {"RG", "RG_IP"}
+ALLOWED_CONDITIONS  = {"H"}
+SIGN_MODE = "positive"   # "all", "positive", "negative"
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+###########################################
+# UTILITIES
+###########################################
+
+def get_allowed_genes(landinfo_file, allowed_types, allowed_conditions):
+    df = pd.read_csv(landinfo_file)
+    return set(df[(df['AnnotTypes'].isin(allowed_types)) &
+                  (df['cond'].isin(allowed_conditions))]['gene'])
+
+def filter_sign(df, mode):
+    mode = str(mode).lower()
+    if mode == "positive":
+        return df[df['coef_mean'] > 0]
+    elif mode == "negative":
+        return df[df['coef_mean'] < 0]
+    else:
+        return df[df['coef_mean'].notna()]
+
+def get_direct_edges(grn_df, focus_gene, allowed_genes, sign_mode="all"):
+    df = grn_df[grn_df['target'] == focus_gene].copy()
+    df = filter_sign(df, sign_mode)
+    df = df[df['source'].isin(allowed_genes)]
+    df['weight'] = df['coef_mean'].abs()
+    return df[['source','target','weight']]
+
+def get_second_level_edges(grn_df, direct_sources, allowed_genes, sign_mode="all"):
+    df = grn_df[grn_df['target'].isin(direct_sources)].copy()
+    df = filter_sign(df, sign_mode)
+    df = df[df['source'].isin(allowed_genes)]
+    df['weight'] = df['coef_mean'].abs()
+    return df[['source','target','weight']]
+
+###########################################
+# NETWORK PLOT
+###########################################
+
+def plot_hierarchy(df_direct, df_second, focus_gene, output_file):
+    G = nx.DiGraph()
+
+    # Add edges (only upstream into JUNB, no JUNB->anything)
+    for _, row in df_direct.iterrows():
+        if row['source'] == focus_gene:
+            continue
+        G.add_edge(row['source'], row['target'], weight=row['weight'], level="direct")
+
+    for _, row in df_second.iterrows():
+        if row['source'] == focus_gene:
+            continue
+        G.add_edge(row['source'], row['target'], weight=row['weight'], level="second")
+
+    # Assign levels
+    levels = {}
+    for src in df_second['source']:
+        levels[src] = 2
+    for src in df_direct['source']:
+        levels[src] = 1
+    levels[focus_gene] = 0
+
+    # Store as node attribute
+    nx.set_node_attributes(G, levels, "subset")
+
+    # Use multipartite layout
+    pos = nx.multipartite_layout(G, subset_key="subset", align="vertical")
+
+    # Flip y so JUNB is at bottom
+    pos = {n:(x,-y) for n,(x,y) in pos.items()}
+
+    # Draw nodes
+    plt.figure(figsize=(10,8))
+    nx.draw_networkx_nodes(G, pos, nodelist=[focus_gene], node_color="red", node_size=1000, alpha=0.9)
+    nx.draw_networkx_nodes(G, pos, nodelist=[n for n in levels if levels[n]==1], node_color="skyblue", node_size=800)
+    nx.draw_networkx_nodes(G, pos, nodelist=[n for n in levels if levels[n]==2], node_color="lightgreen", node_size=700)
+
+    # Draw edges with thickness
+    if G.edges():
+        weights = [G[u][v]['weight'] for u,v in G.edges()]
+        nx.draw_networkx_edges(G, pos, edgelist=G.edges(),
+                               width=[w*3/max(weights) for w in weights],
+                               alpha=0.7, arrows=True)
+
+    # Labels
+    nx.draw_networkx_labels(G, pos, font_size=9, font_color="black")
+
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches="tight", format="pdf")
+    plt.close()
+    print(f"✅ Saved: {output_file}")
+
+###########################################
+# MAIN
+###########################################
+
+def main():
+    allowed_genes = get_allowed_genes(LANDINFO_FILE, ALLOWED_ANNOT_TYPES, ALLOWED_CONDITIONS)
+    grn = pd.read_csv(INPUT_GRN_FILE)
+
+    df_direct = get_direct_edges(grn, FOCUS_GENE, allowed_genes, SIGN_MODE)
+    if df_direct.empty:
+        print("⚠️ No direct upstream edges found.")
+        return
+
+    direct_sources = set(df_direct['source'])
+    df_second = get_second_level_edges(grn, direct_sources, allowed_genes, SIGN_MODE)
+
+    output_file = os.path.join(OUTPUT_DIR, f"{FOCUS_GENE}_upstream_hierarchy.pdf")
+    plot_hierarchy(df_direct, df_second, FOCUS_GENE, output_file)
+
+if __name__ == "__main__":
+    main()
