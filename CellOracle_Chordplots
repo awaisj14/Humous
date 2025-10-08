@@ -294,7 +294,7 @@ if __name__ == "__main__":
     main()
 
 
-
+##### Assessing numbers of genes in a particular category ########
 import pandas as pd
 
 # --- CONFIG ---
