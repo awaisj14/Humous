@@ -1,0 +1,62 @@
+# Load packages
+library(tidyverse)
+library(VennDiagram)
+
+# File paths
+treutlein_file <- "/Users/javed/Documents/Humous_indexing/Analysis_reviewers/Treutlien/GRN_final/RG_GRN_final.csv"
+wang_file <- "/Users/javed/Documents/Humous_indexing/Analysis_reviewers/Wang/CellOracle/GRN_final/RG_GRN_final.csv"
+
+# Load data
+treutlein <- read.csv(treutlein_file, sep = ",")
+wang <- read.csv(wang_file, sep = ",")
+
+# Ensure consistent column names
+colnames(treutlein) <- trimws(colnames(treutlein))
+colnames(wang) <- trimws(colnames(wang))
+
+#### 1️⃣ JUNB as SOURCE
+treutlein_targets <- treutlein %>% dplyr::filter(source == "JUNB") %>% pull(target) %>% unique()
+wang_targets <- wang %>% dplyr::filter(source == "JUNB") %>% pull(target) %>% unique()
+
+# Counts
+cat("JUNB as source:\n")
+cat("Treutlein targets:", length(treutlein_targets), "\n")
+cat("Wang targets:", length(wang_targets), "\n")
+cat("Shared targets:", length(intersect(treutlein_targets, wang_targets)), "\n\n")
+
+
+pdf("JUNB_target_venn.pdf", width = 6, height = 6)
+grid.newpage()
+venn.plot <- venn.diagram(
+  x = list(Treutlein = treutlein_targets, Wang = wang_targets),
+  filename = NULL,
+  fill = c("#009E73", "#D55E00"),
+  alpha = 0.5,
+  cat.cex = 1.2,
+  main = "JUNB as Target"
+)
+grid.draw(venn.plot)
+dev.off()
+#### 2️⃣ JUNB as TARGET
+treutlein_sources <- treutlein %>% dplyr::filter(target == "JUNB") %>% pull(source) %>% unique()
+wang_sources <- wang %>% dplyr::filter(target == "JUNB") %>% pull(source) %>% unique()
+
+# Counts
+cat("JUNB as target:\n")
+cat("Treutlein sources:", length(treutlein_sources), "\n")
+cat("Wang sources:", length(wang_sources), "\n")
+cat("Shared sources:", length(intersect(treutlein_sources, wang_sources)), "\n")
+
+
+pdf("JUNB_sources_venn.pdf", width = 6, height = 6)
+grid.newpage()
+venn.plot <- venn.diagram(
+  x = list(Treutlein = treutlein_sources, Wang = wang_sources),
+  filename = NULL,
+  fill = c("#009E73", "#D55E00"),
+  alpha = 0.5,
+  cat.cex = 1.2,
+  main = "JUNB as Target"
+)
+grid.draw(venn.plot)
+dev.off()
