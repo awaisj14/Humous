@@ -295,12 +295,22 @@ if __name__ == "__main__":
 
 
 ##### Assessing numbers of genes in a particular category ########
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Oct  8 14:35:18 2025
+
+@author: javed
+"""
+
 import pandas as pd
 
 # --- CONFIG ---
 FOCUS_GENE = "JUNB"
 GRN_FILE = "GRN_final/RG_GRN_final.csv"
 LANDINFO_FILE = "/Users/javed/Documents/Humous_indexing/Analysis_reviewers/Final_results/landinfo.csv"
+import pandas as pd
+
 
 # --- LOAD DATA ---
 grn = pd.read_csv(GRN_FILE)
@@ -310,12 +320,19 @@ land = pd.read_csv(LANDINFO_FILE)
 upstream_df = grn[(grn['target'] == FOCUS_GENE) & (grn['coef_mean'] > 0)]
 upstream_genes = set(upstream_df['source'])
 
-# --- Annotate with landinfo ---
-rg_like_genes = set(land[land['AnnotTypes'].isin(['RG', 'RG_IP'])]['gene'])
+# --- Get RG/RG_IP genes in condition H ---
+rg_like_genes_H = set(
+    land[(land['AnnotTypes'].isin(['RG', 'RG_IP'])) & (land['cond'] == 'H')]['gene']
+)
 
 # --- Compute counts ---
 total_upstream = len(upstream_genes)
-rg_upstream = len(upstream_genes & rg_like_genes)
+rg_upstream_H = len(upstream_genes & rg_like_genes_H)
 
 print(f"Total upstream activators of {FOCUS_GENE}: {total_upstream}")
-print(f"Upstream activators in RG/RG-IP annottypes: {rg_upstream}")
+print(f"Upstream activators in RG/RG-IP (cond=H): {rg_upstream_H}")
+
+# Optional: list of RG/RG_IP upstream activators
+print("\nGenes (RG/RG-IP, cond=H):")
+for g in sorted(upstream_genes & rg_like_genes_H):
+    print(g)
