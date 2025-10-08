@@ -292,3 +292,30 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+import pandas as pd
+
+# --- CONFIG ---
+FOCUS_GENE = "JUNB"
+GRN_FILE = "GRN_final/RG_GRN_final.csv"
+LANDINFO_FILE = "/Users/javed/Documents/Humous_indexing/Analysis_reviewers/Final_results/landinfo.csv"
+
+# --- LOAD DATA ---
+grn = pd.read_csv(GRN_FILE)
+land = pd.read_csv(LANDINFO_FILE)
+
+# --- Identify upstream activators of JUNB ---
+upstream_df = grn[(grn['target'] == FOCUS_GENE) & (grn['coef_mean'] > 0)]
+upstream_genes = set(upstream_df['source'])
+
+# --- Annotate with landinfo ---
+rg_like_genes = set(land[land['AnnotTypes'].isin(['RG', 'RG_IP'])]['gene'])
+
+# --- Compute counts ---
+total_upstream = len(upstream_genes)
+rg_upstream = len(upstream_genes & rg_like_genes)
+
+print(f"Total upstream activators of {FOCUS_GENE}: {total_upstream}")
+print(f"Upstream activators in RG/RG-IP annottypes: {rg_upstream}")
