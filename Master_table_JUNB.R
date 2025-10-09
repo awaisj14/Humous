@@ -83,3 +83,57 @@ master <- rg_grn_sub %>%
 # 4. Save output
 # -------------------------
 write_csv(master, "Master_JUNB_Table.csv")
+
+
+
+
+
+##### Sources ########
+library(dplyr)
+library(readr)
+
+# -------------------------
+# 1. Read input files
+# -------------------------
+rg_grn   <- read_csv("RG_GRN_Final.csv")
+landinfo <- read_csv("landinfo.csv")
+
+# -------------------------
+# 2. Filter for JUNB target
+# -------------------------
+junb_sources <- rg_grn %>%
+  dplyr::filter(target == "JUNB")
+
+# -------------------------
+# 3. Prepare landinfo annotations for H, M, and O
+# -------------------------
+land_H <- landinfo %>%
+  dplyr::filter(cond == "H") %>%
+  dplyr::select(gene, Annot_H = AnnotTypes)
+
+land_M <- landinfo %>%
+  dplyr::filter(cond == "M") %>%
+  dplyr::select(gene, Annot_M = AnnotTypes)
+
+land_O <- landinfo %>%
+  dplyr::filter(cond == "O") %>%
+  dplyr::select(gene, Annot_O = AnnotTypes)
+
+# Ensure consistent casing
+land_H$gene <- toupper(land_H$gene)
+land_M$gene <- toupper(land_M$gene)
+land_O$gene <- toupper(land_O$gene)
+junb_sources$source <- toupper(junb_sources$source)
+
+# -------------------------
+# 4. Join annotation info to JUNB source genes
+# -------------------------
+junb_sources_annot <- junb_sources %>%
+  left_join(land_H, by = c("source" = "gene")) %>%
+  left_join(land_M, by = c("source" = "gene")) %>%
+  left_join(land_O, by = c("source" = "gene"))
+
+# -------------------------
+# 5. Save output
+# -------------------------
+write_csv(junb_sources_annot, "JUNB_Source_Genes_with_Annot.csv")
