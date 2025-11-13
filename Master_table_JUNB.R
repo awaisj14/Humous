@@ -137,3 +137,28 @@ junb_sources_annot <- junb_sources %>%
 # 5. Save output
 # -------------------------
 write_csv(junb_sources_annot, "JUNB_Source_Genes_with_Annot.csv")
+
+# Load the data
+df <- read.csv("Master_JUNB_Table.csv", sep = ",", header = TRUE)
+
+# 1. How many are GRN_regulation positive
+pos_count <- sum(df$GRN_regulation == "positive", na.rm = TRUE)
+
+# 2. Of those, how many have H_Lands == "RG" or "RG_IP"
+pos_RG <- subset(df, GRN_regulation == "positive" & H_Lands %in% c("RG"))
+pos_RG_count <- nrow(pos_RG)
+
+# 3. Of those, how many have binding not TRUE
+pos_RG_notbinding <- subset(pos_RG, binding != TRUE)
+pos_RG_notbinding_count <- nrow(pos_RG_notbinding)
+
+# 4. Among GRN positive genes, how many have H3K27ac == "GAIN" or "LOSS"
+pos_gain <- sum(pos_RG$GRN_regulation == "positive" & pos_RG$H3K27ac == "GAIN", na.rm = TRUE)
+pos_loss <- sum(df$GRN_regulation == "positive" & df$H3K27ac == "LOSS", na.rm = TRUE)
+
+# Print results
+cat("1. Total GRN positive genes:", pos_count, "\n")
+cat("2. GRN positive with H_Lands RG or RG_IP:", pos_RG_count, "\n")
+cat("3. Of those, binding not TRUE:", pos_RG_notbinding_count, "\n")
+cat("4. GRN positive with H3K27ac GAIN:", pos_gain, "\n")
+cat("   GRN positive with H3K27ac LOSS:", pos_loss, "\n")
