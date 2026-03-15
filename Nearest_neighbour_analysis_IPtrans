@@ -1,0 +1,129 @@
+# NN-probability metric version:
+# For each gene, y-axis = P(nearest neighbour is GENE_pos) in integrated PCA space
+# (GENE_pos defined from RNA normalized expression > 0)
+# Produces INDIVIDUAL continuum plots with 95% CI for each gene.
+# Now includes a summary table of cell counts per group used in the analysis.
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(readr)
+  library(tibble)
+  library(dplyr)
+  library(ggplot2)
+})
+
+genes <- c("SOX2", "VIM", "EOMES", "DNM3", "PPP1R17", "NEUROD6")
+
+# -----------------------------
+# Load object + add metadata (keep only metadata cells)
+# -----------------------------
+obj <- readRDS("IntHMO.rds")
+
+hu_meta <- read.csv("Hu_metadata.csv", row.names = 1)
+# Intersect to ensure we only use cells present in BOTH the Seurat object and the metadata
+common_cells <- intersect(colnames(obj), rownames(hu_meta))
+obj <- subset(obj, cells = common_cells)
+obj <- Seurat::AddMetaData(obj, metadata = hu_meta[common_cells, , drop = FALSE])
+
+# Differentiation continuum order (x-axis)
+subtype_order <- c("aRG", "oRG", "tRG", "IP-trans", "IP", "imN", "mN")
+obj$Subtype_ek <- factor(as.character(obj$Subtype_ek), levels = subtype_order)
+
+# -----------------------------
+# Generate and print table of cell counts per group
+# -----------------------------
+cat("\n--- Number of Cells per Group Used for Analysis ---\n")
+cell_counts_table <- obj@meta.data %>%
+  dplyr::filter(!is.na(Subtype_ek)) %>%
+  dplyr::count(Subtype_ek, name = "Number_of_Cells") %>%
+  dplyr::mutate(Subtype_ek = factor(Subtype_ek, levels = subtype_order)) %>%
+  dplyr::arrange(Subtype_ek)
+
+print(as.data.frame(cell_counts_table), row.names = FALSE)
+cat("---------------------------------------------------\n\n")
+
+# -----------------------------
+# Integrated PCA (for NN space) + 1-NN indices (computed once)
+# -----------------------------
+Seurat::DefaultAssay(obj) <- "integrated"
+
+# If you want to force recompute PCA on integrated:
+# obj[["pca"]] <- NULL
+
+if (!("pca" %in% names(obj@reductions))) {
+  obj <- Seurat::ScaleData(obj, verbose = FALSE)
+  obj <- Seurat::RunPCA(obj, verbose = FALSE)
+}
+
+n_pcs <- min(50, ncol(Seurat::Embeddings(obj, "pca")))
+pca_emb <- Seurat::Embeddings(obj, "pca")[, 1:n_pcs, drop = FALSE]
+
+dist_mat <- as.matrix(stats::dist(pca_emb))
+diag(dist_mat) <- Inf
+nn_idx <- apply(dist_mat, 1, which.min)
+
+# -----------------------------
+# Function: continuum summary (+95% CI) for one gene using NN-probability metric
+# -----------------------------
+nn_continuum_for_gene <- function(obj, gene, nn_idx, subtype_order, threshold = 0) {
+  Seurat::DefaultAssay(obj) <- "RNA"
+  expr <- Seurat::GetAssayData(obj, slot = "data")[gene, ]
+  expr <- as.numeric(expr)
+  names(expr) <- colnames(obj)
+  
+  gene_status <- ifelse(expr > threshold, "pos", "neg")
+  gene_status <- factor(gene_status, levels = c("neg", "pos"))
+  
+  nn_gene_status <- gene_status[nn_idx]
+  nn_pos <- as.integer(nn_gene_status == "pos")
+  
+  obj@meta.data %>%
+    dplyr::mutate(
+      Subtype_ek = factor(as.character(Subtype_ek), levels = subtype_order),
+      stage = as.numeric(Subtype_ek),
+      nn_pos = nn_pos
+    ) %>%
+    dplyr::filter(!is.na(Subtype_ek)) %>%
+    dplyr::group_by(Subtype_ek, stage) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      p = mean(nn_pos),
+      se = sqrt(p * (1 - p) / n),
+      ci_low = p - 1.96 * se,
+      ci_high = p + 1.96 * se,
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      ci_low = pmax(0, ci_low),
+      ci_high = pmin(1, ci_high),
+      gene = gene
+    )
+}
+
+# -----------------------------
+# Make + print INDIVIDUAL plots per gene
+# -----------------------------
+for (g in genes) {
+  
+  # skip genes not present (quietly)
+  Seurat::DefaultAssay(obj) <- "RNA"
+  if (!(g %in% rownames(obj[["RNA"]]))) next
+  
+  df_g <- nn_continuum_for_gene(obj, gene = g, nn_idx = nn_idx, subtype_order = subtype_order, threshold = 0)
+  
+  p <- ggplot(df_g, aes(x = stage, y = p)) +
+    geom_line(aes(group = 1)) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.12) +
+    scale_x_continuous(breaks = df_g$stage, labels = df_g$Subtype_ek) +
+    coord_cartesian(ylim = c(0, 1)) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(
+      x = "Differentiation continuum (aRG → mN)",
+      y = paste0("P( nearest neighbour is ", g, "_pos ) ± 95% CI"),
+      title = paste0(g, " neighbourhood signal (integrated PCA 1-NN, PCs 1–", n_pcs, ")")
+    )
+  
+  print(p)
+}
